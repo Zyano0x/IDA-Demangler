@@ -25,7 +25,7 @@ TYPE_MAP = {
     'WORD': 'G', 'BOOL': 'H',
 }
 
-CPP_NAME_PATTERN = re.compile(r'^([\w]+)(?:<([^>]+)>)?::([\w~]+|operator.+)$')
+CPP_NAME_PATTERN = re.compile(r'^([\w]+)(?:<([^>]+)>)?::([\w~]+|operator.+?)(?:<([^>]+)>)?$')
 
 
 class Demangler:
@@ -98,7 +98,15 @@ class Demangler:
         return f"{prefix}@{''.join(param_codes)}@Z"
     
     @staticmethod
-    def mangle(class_name, method_name, is_template=False, template_param=None, type_suffix=None):
+    def mangle(class_name, method_name, is_template=False, template_param=None, 
+               method_template_param=None, type_suffix=None):
+        """
+        Build MSVC mangled name.
+        For ZXString<unsigned short>::Assign<char>:
+          - method_template: ??$Assign@D
+          - class_template: @?$ZXString@G@@
+          - Result: ??$Assign@D@?$ZXString@G@@QEAAXXZ
+        """
         # Build class part
         if is_template and template_param:
             type_code = TYPE_MAP.get(template_param, 'D')
@@ -109,12 +117,22 @@ class Demangler:
         # Build method prefix
         if method_name == class_name:
             prefix = "??0"  # Constructor
+            return f"{prefix}{class_part}{type_suffix or ''}"
         elif method_name == f"~{class_name}" or method_name.startswith('~'):
             prefix = "??1"  # Destructor
-        else:
-            prefix = OPERATORS.get(method_name, f"?{method_name}@")
+            return f"{prefix}{class_part}{type_suffix or ''}"
         
-        return f"{prefix}{class_part}{type_suffix or ''}"
+        # Handle method template: ??$MethodName@TypeCode@ClassName@@
+        if method_template_param:
+            method_type_code = TYPE_MAP.get(method_template_param, 'D')
+            return f"??${method_name}@{method_type_code}@{class_part}{type_suffix or ''}"
+        
+        # Handle operators
+        if method_name in OPERATORS:
+            return f"{OPERATORS[method_name]}{class_part}{type_suffix or ''}"
+        
+        # Regular method: ?MethodName@ClassName@@
+        return f"?{method_name}@{class_part}{type_suffix or ''}"
 
 
 class CppRenameAction(idaapi.action_handler_t):
@@ -159,7 +177,7 @@ class CppRenameAction(idaapi.action_handler_t):
             ida_name.set_name(ea, cpp_name, ida_name.SN_NOWARN | ida_name.SN_NOCHECK)
             return
         
-        class_name, template_param, method_name = match.groups()
+        class_name, template_param, method_name, method_template_param = match.groups()
         
         # Get type suffix from function or existing name
         type_suffix = Demangler.build_type_suffix(ea)
@@ -174,13 +192,14 @@ class CppRenameAction(idaapi.action_handler_t):
             class_name, method_name,
             is_template=template_param is not None,
             template_param=template_param,
+            method_template_param=method_template_param,
             type_suffix=type_suffix
         )
         
         if ida_name.set_name(ea, mangled, ida_name.SN_NOWARN | ida_name.SN_NOCHECK):
             idc.set_cmt(ea, f"C++ name: {cpp_name}", 0)
         else:
-            simple_name = cpp_name.replace('::', '_').replace('<', '_').replace('>', '_')
+            simple_name = cpp_name.replace('::', '_').replace('<', '_').replace('>', '_').replace(' ', '_')
             ida_name.set_name(ea, simple_name, ida_name.SN_NOWARN | ida_name.SN_NOCHECK)
             idc.set_cmt(ea, f"C++ name: {cpp_name}\nMangled: {mangled}", 0)
     
